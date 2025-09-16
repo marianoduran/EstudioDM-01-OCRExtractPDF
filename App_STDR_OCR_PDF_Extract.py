@@ -5,17 +5,64 @@ import re
 import io
 from datetime import datetime
 
-# -------------------------
-# Logic adapted from your script (no global side-effects)
-# -------------------------
+# =========================
+# Shared helpers
+# =========================
+def _to_float_money_arg(raw: str) -> float:
+    """Money with $ and Argentine thousands '.' and decimal ',' (e.g., -$ 70.833,71)."""
+    return float(
+        raw.replace("$", "")
+           .replace(".", "")
+           .replace(",", ".")
+           .replace(" ", "")
+           .strip()
+    )
 
-saldo_anterior_regex = re.compile(r"Saldo\s+Inicial\s+(-?\$\s*[\d\.\,]+)")
+def _to_float_money_us(raw: str) -> float:
+    """Money with US-style thousands ',' and decimal '.' (e.g., 1,234.56)."""
+    return float(raw.replace(",", "").strip())
 
-linea_movimiento = re.compile(
+def build_summary(df_movs: pd.DataFrame) -> pd.DataFrame:
+    if df_movs.empty:
+        return pd.DataFrame(columns=["Referencia", "Sum_Importe", "Cantidad", "Pct_Importe", "Pct_Cantidad"])
+
+    # ignore first row (Saldo Inicial)
+    df_work = df_movs.iloc[1:].copy()
+    df_work["Importe"] = pd.to_numeric(df_work["Importe"], errors="coerce")
+
+    summary = df_work.groupby("Referencia", dropna=False).agg(
+        Sum_Importe=("Importe", "sum"),
+        Cantidad=("Referencia", "count")
+    ).reset_index()
+
+    total_abs = summary["Sum_Importe"].abs().sum()
+    summary["Pct_Importe"] = (summary["Sum_Importe"].abs() / total_abs * 100).round(4) if total_abs else 0.0
+    summary["Pct_Cantidad"] = (summary["Cantidad"] / summary["Cantidad"].sum() * 100).round(4)
+
+    total_row = {
+        "Referencia": "TOTAL",
+        "Sum_Importe": summary["Sum_Importe"].sum(),
+        "Cantidad": summary["Cantidad"].sum(),
+        "Pct_Importe": summary["Pct_Importe"].sum(),
+        "Pct_Cantidad": summary["Pct_Cantidad"].sum(),
+    }
+    return pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
+
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, encoding="utf-8")
+    return buf.getvalue().encode("utf-8")
+
+# =========================
+# Santander parser (based on your previous app logic)
+# =========================
+saldo_inicial_stdr_re = re.compile(r"Saldo\s+Inicial\s+(-?\$\s*[\d\.\,]+)")
+
+linea_movimiento_stdr = re.compile(
     r"""^
     (?P<fecha>\d{2}/\d{2}/\d{2})?     # Fecha opcional
     \s*
-    (?:\d+\s+)?                       # Comprobante opcional (número), ignorado
+    (?:\d+\s+)?                       # Comprobante opcional
     (?P<movimiento>.*?)               # Movimiento (texto)
     \s+
     (?:
@@ -31,23 +78,19 @@ linea_movimiento = re.compile(
     re.VERBOSE
 )
 
-linea_transferencia = re.compile(
+linea_transferencia_stdr = re.compile(
     r'^(?:De|A)(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ\s,.]+)?\s*/\s*(?:transf|varios)\s*-\s*var\s*/.*$',
     re.IGNORECASE
 )
 
-def _clean_money(raw: str) -> float:
-    return float(
-        raw.replace("$", "").replace(".", "").replace(",", ".").replace(" ", "").strip()
-    )
-
-def parse_pdf_to_movimientos(file_like) -> pd.DataFrame:
-    """Replicates the core parsing logic, returning the movimientos DataFrame."""
+def parse_santander_pdf(file_like) -> pd.DataFrame:
     movimientos = []
     fecha_actual = None
+    fecha_anterior = None
     previous_saldo = None
     saldo_anterior_registrado = False
     row_transferencia = False
+    current_row = None
 
     with pdfplumber.open(file_like) as pdf:
         for page in pdf.pages:
@@ -55,9 +98,9 @@ def parse_pdf_to_movimientos(file_like) -> pd.DataFrame:
             for line in (l.strip() for l in text.splitlines()):
                 # 1) Saldo Inicial
                 if not saldo_anterior_registrado:
-                    m_saldo = saldo_anterior_regex.search(line)
+                    m_saldo = saldo_inicial_stdr_re.search(line)
                     if m_saldo:
-                        saldo_inicial = _clean_money(m_saldo.group(1))
+                        saldo_inicial = _to_float_money_arg(m_saldo.group(1))
                         movimientos.append({
                             "Fecha": "",
                             "Referencia": "Saldo Inicial",
@@ -68,34 +111,30 @@ def parse_pdf_to_movimientos(file_like) -> pd.DataFrame:
                         saldo_anterior_registrado = True
                         continue
 
-                # 2) Línea de movimiento (fecha opcional)
-                m = linea_movimiento.match(line)
+                # 2) Línea de movimiento
+                m = linea_movimiento_stdr.match(line)
                 if m:
                     fecha = m.group("fecha")
                     if fecha:
                         fecha_actual = fecha
                         fecha_anterior = fecha
                     else:
-                        # hereda última fecha válida
-                        fecha_actual = locals().get("fecha_anterior", None)
+                        fecha_actual = fecha_anterior
 
                     referencia = (m.group("movimiento") or "").strip()
 
                     raw_imp = m.group("debito") or m.group("credito")
-                    importe = _clean_money(raw_imp)
-                    # Si es débito, importe negativo
+                    importe = _to_float_money_arg(raw_imp)
                     if m.group("debito"):
-                        importe = -1.0 * importe
+                        importe = -importe
 
                     raw_saldo = m.group("saldo") or m.group("saldo2")
-                    saldo = _clean_money(raw_saldo)
+                    saldo = _to_float_money_arg(raw_saldo)
 
-                    # Ajuste según diferencia de saldo (tu control de integridad)
+                    # Ajuste por diferencia de saldo (cuando sube el saldo)
                     if previous_saldo is not None and (saldo - previous_saldo) > 0:
-                        importe = -importe  # invierte signo si sube el saldo
-                        # (Se omite logging detallado en UI)
+                        importe = -importe
 
-                    # Si es encabezado de transferencia, marcar bandera para esperar detalle
                     if referencia.lower() in ("transferencia recibida", "transferencia realizada"):
                         current_row = {"Fecha": fecha_actual, "Referencia": referencia,
                                        "Importe": importe, "Saldo": saldo}
@@ -113,8 +152,8 @@ def parse_pdf_to_movimientos(file_like) -> pd.DataFrame:
                     previous_saldo = saldo
                     continue
 
-                # 3) Línea de detalle de transferencia (si corresponde)
-                if linea_transferencia.match(line):
+                # 3) Detalle de transferencia
+                if linea_transferencia_stdr.match(line):
                     if row_transferencia and previous_saldo is not None and current_row is not None:
                         movimientos.append({
                             "Fecha": current_row["Fecha"],
@@ -123,89 +162,154 @@ def parse_pdf_to_movimientos(file_like) -> pd.DataFrame:
                             "Saldo": current_row["Saldo"]
                         })
                         row_transferencia = False
+                        current_row = None
 
     return pd.DataFrame(movimientos)
 
-def build_summary(df_movs: pd.DataFrame) -> pd.DataFrame:
-    """Creates the resumen por referencia, with totals row, like your script."""
-    if df_movs.empty:
-        return pd.DataFrame(columns=["Referencia", "Sum_Importe", "Cantidad", "Pct_Importe", "Pct_Cantidad"])
+# =========================
+# HSBC parser (adapted to work in-memory)
+# Based on your provided HSBC script’s regex and flow
+# =========================
+saldo_anterior_hsbc_re = re.compile(
+    r"(?i)SALDO\s+ANTERIOR.*?((?:\d{1,3}(?:,\d{3})*|\d*)\.\d{2})$"
+)
+linea_con_fecha_hsbc = re.compile(
+    r"""^(?P<fecha>\d{2}-[A-Z]{3})\s+-\s+
+        (?P<referencia>.+?)\s+
+        \d{5}\s+
+        (?P<debito>(?:\d{1,3}(?:,\d{3})*|\d*)?\.\d{2})?\s*
+        (?P<credito>(?:\d{1,3}(?:,\d{3})*|\d*)?\.\d{2})?\s+
+        (?P<saldo>(?:\d{1,3}(?:,\d{3})*|\d*)?\.\d{2})
+    """, re.VERBOSE
+)
+linea_sin_fecha_hsbc = re.compile(
+    r"""^\s*-\s+
+        (?P<referencia>.+?)\s+
+        \d{5}\s+
+        (?P<debito>(?:\d{1,3}(?:,\d{3})*|\d*)?\.\d{2})?\s*
+        (?P<credito>(?:\d{1,3}(?:,\d{3})*|\d*)?\.\d{2})?\s+
+        (?P<saldo>(?:\d{1,3}(?:,\d{3})*|\d*)?\.\d{2})
+    """, re.VERBOSE
+)
 
-    # ignorar primera fila (Saldo Inicial)
-    df_work = df_movs.iloc[1:].copy()
-    df_work["Importe"] = pd.to_numeric(df_work["Importe"], errors="coerce")
+def parse_hsbc_pdf(file_like) -> pd.DataFrame:
+    movimientos = []
+    fecha_actual = None
+    previous_saldo = None
+    saldo_anterior_registrado = False
 
-    summary = df_work.groupby("Referencia").agg(
-        Sum_Importe=("Importe", "sum"),
-        Cantidad=("Referencia", "count")
-    ).reset_index()
+    with pdfplumber.open(file_like) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            for raw in text.splitlines():
+                line = raw.strip()
 
-    if summary["Sum_Importe"].abs().sum() == 0:
-        summary["Pct_Importe"] = 0.0
-    else:
-        summary["Pct_Importe"] = ((summary["Sum_Importe"].abs() / summary["Sum_Importe"].abs().sum()) * 100).round(4)
+                # 1) SALDO ANTERIOR
+                if not saldo_anterior_registrado:
+                    m_saldo = saldo_anterior_hsbc_re.search(line)
+                    if m_saldo:
+                        saldo_inicial = _to_float_money_us(m_saldo.group(1))
+                        movimientos.append({
+                            "Fecha": "",
+                            "Referencia": "SALDO ANTERIOR",
+                            "Importe": "",
+                            "Saldo": saldo_inicial
+                        })
+                        previous_saldo = saldo_inicial
+                        saldo_anterior_registrado = True
+                        continue
 
-    summary["Pct_Cantidad"] = ((summary["Cantidad"] / summary["Cantidad"].sum()) * 100).round(4)
+                # 2) Línea con fecha
+                m_fecha = linea_con_fecha_hsbc.match(line)
+                if m_fecha:
+                    fecha_actual = m_fecha.group("fecha")
+                    referencia = (m_fecha.group("referencia") or "").strip()
+                    saldo = _to_float_money_us(m_fecha.group("saldo"))
+                    # Importe por diferencia de saldos (como en tu script)
+                    importe = round(saldo - previous_saldo, 2) if previous_saldo is not None else 0.0
 
-    total_row = {
-        "Referencia": "TOTAL",
-        "Sum_Importe": summary["Sum_Importe"].sum(),
-        "Cantidad": summary["Cantidad"].sum(),
-        "Pct_Importe": summary["Pct_Importe"].sum(),
-        "Pct_Cantidad": summary["Pct_Cantidad"].sum()
-    }
-    summary = pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
-    return summary
+                    movimientos.append({
+                        "Fecha": fecha_actual,
+                        "Referencia": referencia,
+                        "Importe": importe,
+                        "Saldo": saldo
+                    })
+                    previous_saldo = saldo
+                    continue
 
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    buf = io.StringIO()
-    df.to_csv(buf, index=False, encoding="utf-8")
-    return buf.getvalue().encode("utf-8")
+                # 3) Línea sin fecha (hereda fecha_actual)
+                m_sf = linea_sin_fecha_hsbc.match(line)
+                if m_sf and fecha_actual:
+                    referencia = (m_sf.group("referencia") or "").strip()
+                    saldo = _to_float_money_us(m_sf.group("saldo"))
+                    importe = round(saldo - previous_saldo, 2) if previous_saldo is not None else 0.0
 
+                    movimientos.append({
+                        "Fecha": fecha_actual,
+                        "Referencia": referencia,
+                        "Importe": importe,
+                        "Saldo": saldo
+                    })
+                    previous_saldo = saldo
 
-# -------------------------
+    return pd.DataFrame(movimientos)
+
+# =========================
 # Streamlit UI
-# -------------------------
+# =========================
+st.set_page_config(page_title="OCR Extract PDF (Santander / HSBC)", page_icon="🏦", layout="wide")
+st.title("🏦 Extractor de Movimientos desde PDF")
 
-st.set_page_config(page_title="Extractor de Movimientos PDF", page_icon="📄")
-st.title("📄 Extractor de Movimientos desde PDF (Santander / similar)")
+# Sidebar menu
+choice = st.sidebar.radio(
+    "Elegí el banco",
+    ["Santander OCR Extract", "HSBC OCR Extract"],
+    index=0
+)
 
-st.write("Subí tu archivo PDF, lo procesamos y podés descargar:")
-st.markdown("- **Detalle de movimientos**")
-st.markdown("- **Resumen por referencia**")
+st.markdown(
+    "Subí tu PDF y descargá los resultados en CSV: **Detalle de movimientos** y **Resumen por referencia**."
+)
 
-uploaded = st.file_uploader("Elegí un extracto bancario en PDF", type=["pdf"])
+uploaded = st.file_uploader("Elegí el extracto bancario (PDF)", type=["pdf"])
 
 if uploaded is not None:
     base_name = uploaded.name.rsplit(".pdf", 1)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M")
 
-    with st.spinner("Procesando PDF..."):
-        df_movs = parse_pdf_to_movimientos(uploaded)
+    with st.spinner(f"Procesando PDF con {choice}..."):
+        if choice == "Santander OCR Extract":
+            df_movs = parse_santander_pdf(uploaded)
+        else:
+            df_movs = parse_hsbc_pdf(uploaded)
+
         if df_movs.empty:
             st.error("No se detectaron movimientos en el PDF.")
         else:
-            # Mostrar previews
-            st.subheader("Vista previa: Detalle de Movimientos")
-            st.dataframe(df_movs.head(30), use_container_width=True)
-
             df_summary = build_summary(df_movs)
-            st.subheader("Vista previa: Resumen por Referencia")
-            st.dataframe(df_summary, use_container_width=True)
 
-            # Botones de descarga (mismos nombres que tu script, con timestamp)
-            detalle_filename = f"{base_name}_Detalle_Movimientos_{ts}.csv"
-            resumen_filename = f"{base_name}_Resumen_Referencias_{ts}.csv"
+            # Previews
+            colA, colB = st.columns(2)
+            with colA:
+                st.subheader("Detalle de Movimientos (preview)")
+                st.dataframe(df_movs.head(30), use_container_width=True)
+            with colB:
+                st.subheader("Resumen por Referencia")
+                st.dataframe(df_summary, use_container_width=True)
 
-            col1, col2 = st.columns(2)
-            with col1:
+            # Downloads
+            detalle_filename = f"{base_name}_{'STDR' if choice.startswith('Santander') else 'HSBC'}_Detalle_Movimientos_{ts}.csv"
+            resumen_filename = f"{base_name}_{'STDR' if choice.startswith('Santander') else 'HSBC'}_Resumen_Referencias_{ts}.csv"
+
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
                 st.download_button(
                     label="⬇️ Descargar Detalle de Movimientos (CSV)",
                     data=to_csv_bytes(df_movs),
                     file_name=detalle_filename,
                     mime="text/csv"
                 )
-            with col2:
+            with dcol2:
                 st.download_button(
                     label="⬇️ Descargar Resumen por Referencia (CSV)",
                     data=to_csv_bytes(df_summary),
@@ -213,15 +317,18 @@ if uploaded is not None:
                     mime="text/csv"
                 )
 
-            # (Opcional) KPIs rápidos (como tu resumen de consola)
+            # KPIs
             try:
                 saldo_inicial = float(df_movs["Saldo"].iloc[0])
                 total_movs = pd.to_numeric(df_movs.iloc[1:]["Importe"], errors="coerce").sum()
                 saldo_final = float(df_movs["Saldo"].iloc[-1])
 
                 st.markdown("### Resumen")
-                st.metric("Saldo Inicial", f"{saldo_inicial:,.2f}")
-                st.metric("Total Movimientos", f"{total_movs:,.2f}")
-                st.metric("Saldo Final", f"{saldo_final:,.2f}")
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Saldo Inicial", f"{saldo_inicial:,.2f}")
+                k2.metric("Total Movimientos", f"{total_movs:,.2f}")
+                k3.metric("Saldo Final", f"{saldo_final:,.2f}")
             except Exception:
                 pass
+else:
+    st.info("Subí un PDF para comenzar.")

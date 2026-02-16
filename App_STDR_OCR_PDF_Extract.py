@@ -230,6 +230,40 @@ def parse_hsbc_pdf(file_like) -> pd.DataFrame:
     return pd.DataFrame(movimientos)
 
 # =========================
+# Shared helpers (continued)
+# =========================
+def build_summary(df_movs: pd.DataFrame) -> pd.DataFrame:
+    if df_movs.empty:
+        return pd.DataFrame(columns=["Referencia", "Sum_Importe", "Cantidad", "Pct_Importe", "Pct_Cantidad"])
+
+    # ignore "Saldo Inicial" rows explicitly
+    df_work = df_movs[df_movs["Referencia"] != "Saldo Inicial"].copy()
+    df_work["Importe"] = pd.to_numeric(df_work["Importe"], errors="coerce")
+
+    summary = df_work.groupby("Referencia", dropna=False).agg(
+        Sum_Importe=("Importe", "sum"),
+        Cantidad=("Referencia", "count")
+    ).reset_index()
+
+    total_abs = summary["Sum_Importe"].abs().sum()
+    summary["Pct_Importe"] = (summary["Sum_Importe"].abs() / total_abs * 100).round(4) if total_abs else 0.0
+    summary["Pct_Cantidad"] = (summary["Cantidad"] / summary["Cantidad"].sum() * 100).round(4)
+
+    total_row = {
+        "Referencia": "TOTAL",
+        "Sum_Importe": summary["Sum_Importe"].sum(),
+        "Cantidad": summary["Cantidad"].sum(),
+        "Pct_Importe": summary["Pct_Importe"].sum(),
+        "Pct_Cantidad": summary["Pct_Cantidad"].sum(),
+    }
+    return pd.concat([summary, pd.DataFrame([total_row])], ignore_index=True)
+
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, encoding="utf-8")
+    return buf.getvalue().encode("utf-8")
+
+# =========================
 # Streamlit UI
 # =========================
 st.set_page_config(page_title="OCR Extract PDF (Santander / HSBC)", page_icon="🏦", layout="wide")

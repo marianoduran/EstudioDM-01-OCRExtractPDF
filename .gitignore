@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+PDFs/
+debug_*.py
+reproduce_*.py
+locate_*.py
+*.csv

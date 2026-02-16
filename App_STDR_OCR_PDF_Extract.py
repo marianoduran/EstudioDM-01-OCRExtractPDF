@@ -26,8 +26,8 @@ def build_summary(df_movs: pd.DataFrame) -> pd.DataFrame:
     if df_movs.empty:
         return pd.DataFrame(columns=["Referencia", "Sum_Importe", "Cantidad", "Pct_Importe", "Pct_Cantidad"])
 
-    # ignore first row (Saldo Inicial)
-    df_work = df_movs.iloc[1:].copy()
+    # ignore "Saldo Inicial" rows explicitly
+    df_work = df_movs[df_movs["Referencia"] != "Saldo Inicial"].copy()
     df_work["Importe"] = pd.to_numeric(df_work["Importe"], errors="coerce")
 
     summary = df_work.groupby("Referencia", dropna=False).agg(
@@ -66,20 +66,20 @@ linea_movimiento_stdr = re.compile(
     (?P<movimiento>.*?)               # Movimiento (texto)
     \s+
     (?:
-        (?P<debito>-?\$\s*[\d\.\,]+)   # Débito
+        (?P<debito>-?\s*\$\s*[\d\.\,]+)   # Débito
         \s+
-        (?P<saldo>-?\$\s*[\d\.\,]+)    # Saldo si no hay crédito
+        (?P<saldo>-?\s*\$\s*[\d\.\,]+)    # Saldo si no hay crédito
       |
-        (?P<credito>-?\$\s*[\d\.\,]+)  # Crédito
+        (?P<credito>-?\s*\$\s*[\d\.\,]+)  # Crédito
         \s+
-        (?P<saldo2>-?\$\s*[\d\.\,]+)   # Saldo si no hay débito
+        (?P<saldo2>-?\s*\$\s*[\d\.\,]+)   # Saldo si no hay débito
     )
     $""",
     re.VERBOSE
 )
 
 linea_transferencia_stdr = re.compile(
-    r'^(?:De|A)(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ\s,.]+)?\s*/\s*(?:transf|varios)\s*-\s*var\s*/.*$',
+    r'^(?:De|A)(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ\s,.]+)?\s*/\s*.*?\s*-\s*.*?\s*/.*$',
     re.IGNORECASE
 )
 
@@ -154,7 +154,7 @@ def parse_santander_pdf(file_like) -> pd.DataFrame:
 
                 # 3) Detalle de transferencia
                 if linea_transferencia_stdr.match(line):
-                    if row_transferencia and previous_saldo is not None and current_row is not None:
+                    if row_transferencia and current_row is not None:
                         movimientos.append({
                             "Fecha": current_row["Fecha"],
                             "Referencia": current_row["Referencia"] + " - " + line,

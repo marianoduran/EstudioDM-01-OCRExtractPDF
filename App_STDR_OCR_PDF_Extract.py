@@ -272,7 +272,7 @@ st.title("🏦 Extractor de Movimientos desde PDF")
 # Sidebar menu
 choice = st.sidebar.radio(
     "Elegí el banco",
-    ["Santander OCR Extract", "HSBC OCR Extract"],
+    ["Santander OCR Extract", "HSBC OCR Extract", "System Info"],
     index=0
 )
 
@@ -280,64 +280,75 @@ st.markdown(
     "Subí tu PDF y descargá los resultados en CSV: **Detalle de movimientos** y **Resumen por referencia**."
 )
 
-uploaded = st.file_uploader("Elegí el extracto bancario (PDF)", type=["pdf"])
+if choice == "System Info":
+    st.subheader("📦 Librerías Instaladas (pip freeze)")
+    import subprocess
+    try:
+        # Run pip freeze
+        result = subprocess.run(["pip", "freeze"], capture_output=True, text=True)
+        st.code(result.stdout, language="text")
+    except Exception as e:
+        st.error(f"Error getting library versions: {e}")
 
-if uploaded is not None:
-    base_name = uploaded.name.rsplit(".pdf", 1)[0]
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
-
-    with st.spinner(f"Procesando PDF con {choice}..."):
-        if choice == "Santander OCR Extract":
-            df_movs = parse_santander_pdf(uploaded)
-        else:
-            df_movs = parse_hsbc_pdf(uploaded)
-
-        if df_movs.empty:
-            st.error("No se detectaron movimientos en el PDF.")
-        else:
-            df_summary = build_summary(df_movs)
-
-            # Previews
-            colA, colB = st.columns(2)
-            with colA:
-                st.subheader("Detalle de Movimientos (preview)")
-                st.dataframe(df_movs.head(30), use_container_width=True)
-            with colB:
-                st.subheader("Resumen por Referencia")
-                st.dataframe(df_summary, use_container_width=True)
-
-            # Downloads
-            detalle_filename = f"{base_name}_{'STDR' if choice.startswith('Santander') else 'HSBC'}_Detalle_Movimientos_{ts}.csv"
-            resumen_filename = f"{base_name}_{'STDR' if choice.startswith('Santander') else 'HSBC'}_Resumen_Referencias_{ts}.csv"
-
-            dcol1, dcol2 = st.columns(2)
-            with dcol1:
-                st.download_button(
-                    label="⬇️ Descargar Detalle de Movimientos (CSV)",
-                    data=to_csv_bytes(df_movs),
-                    file_name=detalle_filename,
-                    mime="text/csv"
-                )
-            with dcol2:
-                st.download_button(
-                    label="⬇️ Descargar Resumen por Referencia (CSV)",
-                    data=to_csv_bytes(df_summary),
-                    file_name=resumen_filename,
-                    mime="text/csv"
-                )
-
-            # KPIs
-            try:
-                saldo_inicial = float(df_movs["Saldo"].iloc[0])
-                total_movs = pd.to_numeric(df_movs.iloc[1:]["Importe"], errors="coerce").sum()
-                saldo_final = float(df_movs["Saldo"].iloc[-1])
-
-                st.markdown("### Resumen")
-                k1, k2, k3 = st.columns(3)
-                k1.metric("Saldo Inicial", f"{saldo_inicial:,.2f}")
-                k2.metric("Total Movimientos", f"{total_movs:,.2f}")
-                k3.metric("Saldo Final", f"{saldo_final:,.2f}")
-            except Exception:
-                pass
 else:
-    st.info("Subí un PDF para comenzar.")
+    uploaded = st.file_uploader("Elegí el extracto bancario (PDF)", type=["pdf"])
+
+    if uploaded is not None:
+        base_name = uploaded.name.rsplit(".pdf", 1)[0]
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+
+        with st.spinner(f"Procesando PDF con {choice}..."):
+            if choice == "Santander OCR Extract":
+                df_movs = parse_santander_pdf(uploaded)
+            else:
+                df_movs = parse_hsbc_pdf(uploaded)
+
+            if df_movs.empty:
+                st.error("No se detectaron movimientos en el PDF.")
+            else:
+                df_summary = build_summary(df_movs)
+
+                # Previews
+                colA, colB = st.columns(2)
+                with colA:
+                    st.subheader("Detalle de Movimientos (preview)")
+                    st.dataframe(df_movs.head(30), use_container_width=True)
+                with colB:
+                    st.subheader("Resumen por Referencia")
+                    st.dataframe(df_summary, use_container_width=True)
+
+                # Downloads
+                detalle_filename = f"{base_name}_{'STDR' if choice.startswith('Santander') else 'HSBC'}_Detalle_Movimientos_{ts}.csv"
+                resumen_filename = f"{base_name}_{'STDR' if choice.startswith('Santander') else 'HSBC'}_Resumen_Referencias_{ts}.csv"
+
+                dcol1, dcol2 = st.columns(2)
+                with dcol1:
+                    st.download_button(
+                        label="⬇️ Descargar Detalle de Movimientos (CSV)",
+                        data=to_csv_bytes(df_movs),
+                        file_name=detalle_filename,
+                        mime="text/csv"
+                    )
+                with dcol2:
+                    st.download_button(
+                        label="⬇️ Descargar Resumen por Referencia (CSV)",
+                        data=to_csv_bytes(df_summary),
+                        file_name=resumen_filename,
+                        mime="text/csv"
+                    )
+
+                # KPIs
+                try:
+                    saldo_inicial = float(df_movs["Saldo"].iloc[0])
+                    total_movs = pd.to_numeric(df_movs.iloc[1:]["Importe"], errors="coerce").sum()
+                    saldo_final = float(df_movs["Saldo"].iloc[-1])
+
+                    st.markdown("### Resumen")
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Saldo Inicial", f"{saldo_inicial:,.2f}")
+                    k2.metric("Total Movimientos", f"{total_movs:,.2f}")
+                    k3.metric("Saldo Final", f"{saldo_final:,.2f}")
+                except Exception:
+                    pass
+    else:
+        st.info("Subí un PDF para comenzar.")

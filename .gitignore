@@ -1,0 +1,16 @@
+# Virtual environment
+.venv/
+
+# Dev container config
+.devcontainer/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# PDF files (bank statements — sensitive data)
+PDFs/
+
+# OS
+.DS_Store
+Thumbs.db

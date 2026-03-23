@@ -110,6 +110,16 @@ def parse_santander_pdf(file_like) -> pd.DataFrame:
                     if previous_saldo is not None and (saldo - previous_saldo) > 0:
                         importe = -importe
 
+                    # Validar consistencia: saldo_anterior + importe debe ser igual al saldo de la línea
+                    if previous_saldo is not None:
+                        expected = round(previous_saldo + importe, 2)
+                        if abs(expected - round(saldo, 2)) > 0.01:
+                            raise ValueError(
+                                f"Error de consistencia en fila '{referencia}' (fecha {fecha_actual}): "
+                                f"saldo anterior {previous_saldo:,.2f} + importe {importe:,.2f} = {expected:,.2f} "
+                                f"pero el saldo registrado en el PDF es {saldo:,.2f}"
+                            )
+
                     if referencia.lower() in ("transferencia recibida", "transferencia realizada"):
                         current_row = {"Fecha": fecha_actual, "Referencia": referencia,
                                        "Importe": importe, "Saldo": saldo}
@@ -298,10 +308,14 @@ else:
         ts = datetime.now().strftime("%Y%m%d_%H%M")
 
         with st.spinner(f"Procesando PDF con {choice}..."):
-            if choice == "Santander OCR Extract":
-                df_movs = parse_santander_pdf(uploaded)
-            else:
-                df_movs = parse_hsbc_pdf(uploaded)
+            try:
+                if choice == "Santander OCR Extract":
+                    df_movs = parse_santander_pdf(uploaded)
+                else:
+                    df_movs = parse_hsbc_pdf(uploaded)
+            except ValueError as e:
+                st.error(str(e))
+                st.stop()
 
             if df_movs.empty:
                 st.error("No se detectaron movimientos en el PDF.")

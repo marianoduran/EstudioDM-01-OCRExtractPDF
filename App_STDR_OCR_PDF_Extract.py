@@ -6,7 +6,7 @@ import io
 from datetime import datetime
 
 # =========================
-# Shared helpers
+# Shared helpers.
 # =========================
 def _to_float_money_arg(raw: str) -> float:
     """Money with $ and Argentine thousands '.' and decimal ',' (e.g., -$ 70.833,71)."""
